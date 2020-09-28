@@ -1,0 +1,15 @@
+language: rust
+rust:
+  - stable
+  - beta
+  - nightly
+env:
+  - RUST_BACKTRACE=1
+script:
+  - cargo test --verbose
+  - rustup component add rustfmt-preview
+  - cargo fmt -- --check
+jobs:
+  allow_failures:
+    - rust: nightly
+  fast_finish: true
