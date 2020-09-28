@@ -1,0 +1,17 @@
+[[accounts]]
+    username = "firstname.lastname@gmail.com"
+    [accounts.password]
+        type = "EnvVar"
+        name = "MAIN_GMAIL_PASS"
+    [accounts.backup]
+        type = "Sqlite"
+        backup_dir = "/Users/firstname/gmail_backup_main/"
+
+[[accounts]]
+    username = "alter.ego@gmail.com"
+    [accounts.password]
+        type = "EnvVar"
+        name = "OTHER_GMAIL_PASS"
+    [accounts.backup]
+        type = "Sqlite"
+        backup_dir = "/Users/firstname/gmail_backup_alterego/"

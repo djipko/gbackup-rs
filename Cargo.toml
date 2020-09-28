@@ -1,0 +1,19 @@
+[package]
+name = "gbackup-rs"
+version = "0.1.0"
+authors = ["Nikola Dipanov <nikola.djipanov@gmail.com>"]
+edition = "2018"
+description = "Fast and configurable CLI tool to back-up your GMail data"
+license = "MIT"
+keywords = ["gmail", "backup", "cli"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = "2.27.1"
+imap = "2.3.0"
+native-tls = "0.2.4"
+rusqlite = "0.24.0"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+threadpool = "1.8.1"
+toml = "0.5.6"
