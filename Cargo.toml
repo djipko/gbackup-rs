@@ -7,6 +7,7 @@ description = "Fast and configurable CLI tool to back-up your GMail data"
 license = "MIT"
 keywords = ["gmail", "backup", "cli"]
 categories = ["command-line-utilities"]
+repository = "https://github.com/djipko/gbackup-rs/"
 
 [dependencies]
 clap = "2.27.1"
