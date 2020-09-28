@@ -1,5 +1,7 @@
 # gbackup-rs - Backup your GMail
 
+[![Build Status](https://travis-ci.org/djipko/gbackup-rs.svg?branch=master)](https://travis-ci.org/djipko/gbackup-rs)
+
 gbackup-rs is yet another tool for backing up your GMail account with a few
 features worth calling out:
 
