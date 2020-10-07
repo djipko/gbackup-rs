@@ -38,6 +38,9 @@ rather self-explanatory config would look something like:
     [accounts.backup]
         type = "Sqlite"
         backup_dir = "/Users/firstname/gmail_backup_test/"
+    [accounts.export]
+        type = "Mbox"
+        path = "/Users/firstname/gmail.mbox"
 ```
 
 and by default it's expected to be stored in a file called `.gbackup.toml` in the
@@ -57,6 +60,16 @@ The resulting backup can then be found in the configured directory as `backup.sq
 
 NOTE that you will need to set up an app password for you gmail account
  [here](https://myaccount.google.com/apppasswords)
+
+Exporting the data to a widely used format such as [mbox](http://qmail.org./man/man5/mbox.html)
+can be done by running with the `export` subcommand
+
+```bash
+./gbackup-rs -c ~/.gbackup.toml export
+```
+
+This will in turn run any export engines configured for each account in the config,
+if any.
 
 ## Future features
 

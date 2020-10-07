@@ -52,11 +52,24 @@
 //! a single worker (the default) should be fine for low volume personal accounts.
 //!
 //! The resulting backup can then be found in the configured directory as `backup.sqlite`
+//!
+//! Exporting the data to a widely used format such as [mbox](http://qmail.org./man/man5/mbox.html)
+//! can be done by running with the `export` subcommand
+//! 
+//! ```bash
+//! ./gbackup-rs -c ~/.gbackup.toml export
+//! ```
+//! 
+//! This will in turn run any export engines configured for each account in the config,
+//! if any.
 
-use clap::{App, Arg};
+use chrono::{TimeZone, Utc};
+use clap::{App, Arg, SubCommand};
 use imap::error::Error as IMAPError;
 use imap::types::{Fetch, Uid, ZeroCopy};
 use imap::Session;
+use mailparse;
+use mailparse::MailHeaderMap;
 use native_tls;
 use native_tls::Error as TLSError;
 use rusqlite;
@@ -64,6 +77,9 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::fs;
+use std::fs::File;
+use std::io;
+use std::io::Write;
 use std::iter::FromIterator;
 use std::path::Path;
 use std::str;
@@ -74,6 +90,7 @@ use threadpool::ThreadPool;
 use toml;
 
 type TLSStream = native_tls::TlsStream<std::net::TcpStream>;
+type Rfc822Data = Vec<u8>;
 
 const ALL_MAIL_INBOX: &str = "[Gmail]/All Mail";
 
@@ -91,10 +108,17 @@ enum BackupEngineConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ExportEngineConfig {
+    Mbox { path: Option<String> },
+}
+
+#[derive(Debug, Deserialize)]
 struct GBackupAccount {
     username: String,
     password: LoadPassword,
     backup: Option<BackupEngineConfig>,
+    export: Option<ExportEngineConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +135,22 @@ enum BackupEngineError {
 }
 
 #[derive(Debug, Error)]
+enum ExportEngineError {
+    #[error("Export engine issue with Sqlite DB: {0}!")]
+    SqliteError(#[from] rusqlite::Error),
+    #[error("Export engine issue while loading data from Sqlite DB: {0}!")]
+    SqliteReadError(#[from] rusqlite::types::FromSqlError),
+    #[error("Operation not supported by engine")]
+    UnsupportedOp,
+    #[error("Export engine IO error: {0}")]
+    IOErrror(#[from] io::Error),
+    #[error("Error converting to Mbox fromat: {0}")]
+    MboxFormatError(String),
+    #[error("Export engine error parsing email: {0}")]
+    MailParseError(#[from] mailparse::MailParseError),
+}
+
+#[derive(Debug, Error)]
 enum GBackupError {
     #[error("TLS error {0}")]
     TLSError(#[from] TLSError),
@@ -122,6 +162,17 @@ enum GBackupError {
     BackupConfigError(String),
     #[error("Error returned by the backup engine: {0}!")]
     BackupError(#[from] BackupEngineError),
+    #[error("Failed to load export config for: {0}!")]
+    ExportConfigError(String),
+    #[error("Error returned by the export engine: {0}!")]
+    ExportError(#[from] ExportEngineError),
+    #[error("Error parsing rfc822 data: {0}!")]
+    MailParseError(#[from] mailparse::MailParseError),
+}
+
+struct ExportEmail {
+    raw_data: Rfc822Data,
+    uid: Uid,
 }
 
 /// Main trait used to implement a backup strategy - see method docs for more
@@ -144,9 +195,18 @@ trait BackupEngine {
     /// in the imap crate. Any progress reporting should be done from this
     /// method too - it will be called only once per each GMail account in the config
     fn run_backup(&mut self, to_backup: &Vec<&Fetch>) -> Result<(), BackupEngineError>;
+
+    /// If an engine can be used for exporting data - this is the method to
+    /// implement that will be called and pass the data to a struct implementing
+    /// the `ExportEngine` trait (see bellow). `SqliteEngine` provides a good
+    /// example of this
+    fn get_all_emails_raw(&self) -> Result<Vec<ExportEmail>, ExportEngineError> {
+        Err(ExportEngineError::UnsupportedOp)
+    }
 }
 
 struct StdoutEngine<'a> {
+    #[allow(dead_code)]
     account: &'a GBackupAccount,
     count: usize,
 }
@@ -196,6 +256,7 @@ impl<'a> BackupEngine for StdoutEngine<'a> {
 }
 
 struct SqliteEngine<'a> {
+    #[allow(dead_code)]
     account: &'a GBackupAccount,
     conn: rusqlite::Connection,
 }
@@ -226,7 +287,7 @@ impl<'a> SqliteEngine<'a> {
     }
 }
 
-impl<'a> BackupEngine for SqliteEngine<'a> {
+impl<'s> BackupEngine for SqliteEngine<'s> {
     fn filter_for_backup(
         &self,
         search_uids: &HashSet<Uid>,
@@ -264,6 +325,18 @@ impl<'a> BackupEngine for SqliteEngine<'a> {
             to_backup.len()
         );
         Ok(())
+    }
+
+    fn get_all_emails_raw(&self) -> Result<Vec<ExportEmail>, ExportEngineError> {
+        let mut stmt = self.conn.prepare("SELECT uid, rfc822_body FROM email")?;
+        let emails = stmt
+            .query_map(rusqlite::NO_PARAMS, |row| {
+                let uid = row.get(0)?;
+                let raw_data = row.get(1)?;
+                Ok(ExportEmail { raw_data, uid })
+            })?
+            .collect::<Result<Vec<ExportEmail>, _>>()?;
+        Ok(emails)
     }
 }
 
@@ -389,6 +462,133 @@ impl BackupRunner {
     }
 }
 
+/// Trait that is used to implement an export strategy. This is not necessarily
+/// the same as a backup strategy as backing up and exporting email for further
+/// reading/storing/processing can have different requirements. This is
+/// illustrated well by the `SqliteEngine` which is a backup engine and allows
+/// us to do fast, incremental, failure-proof backups using seasoned technology
+/// like an sqlite DB, which we could not do with a flat file like say mbox
+/// format which is very popular with email clients. We still want to be able to
+/// export our email into a more widely used format, and this separation of
+/// concerns is the reason for separate traits.
+trait ExportEngine {
+    /// Implemented this to do any of the exporting logic (including parsing)
+    /// of emails, which is left to each engine, so as to be able to avoid doing
+    /// unnecessary work if parsing of some parts is not needed. This method
+    /// should do any I/O work, and return an appropriate error when needed.
+    fn export_emails(&self, emails: &Vec<ExportEmail>) -> Result<(), ExportEngineError>;
+}
+
+struct MboxEngine<'a> {
+    account: &'a GBackupAccount,
+}
+
+impl<'a> MboxEngine<'a> {
+    fn get_from_line(email: &ExportEmail) -> Result<Vec<u8>, ExportEngineError> {
+        let (headers, _) = mailparse::parse_headers(&email.raw_data).or(Err(
+            ExportEngineError::MboxFormatError(format!(
+                "Can't parse headers for email: {}!",
+                email.uid
+            )),
+        ))?;
+        let from_h = headers
+            .iter()
+            .filter(|h| h.get_key().to_lowercase() == "from")
+            .next()
+            .ok_or(ExportEngineError::MboxFormatError(format!(
+                "Can't find 'From' header in: {:?}",
+                email.uid
+            )))?;
+        let date_str =
+            headers
+                .get_first_value("Date")
+                .ok_or(ExportEngineError::MboxFormatError(format!(
+                    "Can't find 'Date' header in: {:?}",
+                    email.uid
+                )))?;
+
+        let addr = mailparse::addrparse_header(&from_h)
+            .or(Err(ExportEngineError::MboxFormatError(format!(
+                "Can't parse address from header in email: {}!",
+                email.uid
+            ))))?
+            .extract_single_info()
+            .ok_or(ExportEngineError::MboxFormatError(format!(
+                "Can't find a single address from header in email: {}",
+                email.uid
+            )))?
+            .addr;
+        let date = mailparse::dateparse(&date_str).or(Err(ExportEngineError::MboxFormatError(
+            format!("Can't parse Date from header in email: {}", email.uid),
+        )))?;
+        let mut buffer = Vec::new();
+        write!(
+            &mut buffer,
+            "From {} {}\n",
+            addr,
+            Utc.timestamp(date, 0).format("%a %b %d %T %Y")
+        )?;
+        Ok(buffer)
+    }
+}
+
+impl ExportEngine for MboxEngine<'_> {
+    fn export_emails(&self, emails: &Vec<ExportEmail>) -> Result<(), ExportEngineError> {
+        let mut f: Box<dyn io::Write>;
+        if let Some(ExportEngineConfig::Mbox { path: Some(path) }) = &self.account.export {
+            f = Box::new(File::create(path)?);
+        } else {
+            f = Box::new(io::stdout());
+        }
+        // TODO: Make this parallel!
+        emails
+            .iter()
+            .map(|raw_email| {
+                match MboxEngine::get_from_line(raw_email) {
+                    Ok(from_line) => {
+                        f.write_all(&from_line)?;
+                        f.write_all(&raw_email.raw_data)?;
+                        f.write_all(b"\n")?;
+                    }
+                    Err(e) => {
+                        println!("Error parsing email: {:?}!", e);
+                    }
+                }
+                Ok(())
+            })
+            .collect::<Result<(), ExportEngineError>>()?;
+
+        Ok(())
+    }
+}
+
+fn get_export_engine<'a>(
+    account: &'a GBackupAccount,
+) -> Result<Box<dyn ExportEngine + 'a>, GBackupError> {
+    match account.export {
+        Some(ExportEngineConfig::Mbox { .. }) => Ok(Box::new(MboxEngine { account })),
+        _ => Err(GBackupError::ExportConfigError(format!(
+            "Can't load engine from the empty export config for {:?}",
+            account
+        ))),
+    }
+}
+
+struct ExportRunner {
+    account: GBackupAccount,
+}
+
+impl ExportRunner {
+    fn run_export(self) -> Result<(), GBackupError> {
+        let backup_engine = get_backup_engine(&self.account)?;
+        let export_engine = get_export_engine(&self.account)?;
+
+        let emails = backup_engine.get_all_emails_raw()?;
+        export_engine.export_emails(&emails)?;
+        Ok(())
+    }
+}
+
 fn main() -> Result<(), Box<dyn StdError>> {
     let matches = App::new("Gmail backup")
         .version("0.1")
@@ -412,6 +612,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
                 .takes_value(true)
                 .default_value("1"),
         )
+        .subcommand(SubCommand::with_name("export").about("Run an export instead of backing up"))
         .get_matches();
 
     let config_file = matches.value_of("config").unwrap();
@@ -424,9 +625,16 @@ fn main() -> Result<(), Box<dyn StdError>> {
         .accounts
         .into_iter()
         .map(|account| {
-            let runner = BackupRunner::new(account, workers);
-            if let Err(error) = runner.run_backup() {
-                println!("Got error running backup: {}", error);
+            if let Some(_) = matches.subcommand_matches("export") {
+                let runner = ExportRunner { account };
+                if let Err(error) = runner.run_export() {
+                    println!("Got error running export: {}", error);
+                }
+            } else {
+                let runner = BackupRunner::new(account, workers);
+                if let Err(error) = runner.run_backup() {
+                    println!("Got error running backup: {}", error);
+                }
             }
         })
         .for_each(drop);

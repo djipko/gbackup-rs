@@ -6,6 +6,9 @@
     [accounts.backup]
         type = "Sqlite"
         backup_dir = "/Users/firstname/gmail_backup_main/"
+    [accounts.export]
+        type = "Mbox"
+        path = "/Users/firstname/gmail.mbox"
 
 [[accounts]]
     username = "alter.ego@gmail.com"

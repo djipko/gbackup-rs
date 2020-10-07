@@ -10,8 +10,10 @@ categories = ["command-line-utilities"]
 repository = "https://github.com/djipko/gbackup-rs/"
 
 [dependencies]
+chrono = "0.4.19"
 clap = "2.27.1"
 imap = "2.3.0"
+mailparse = "0.13.0"
 native-tls = "0.2.4"
 rusqlite = "0.24.0"
 serde = { version = "1.0", features = ["derive"] }
