@@ -55,11 +55,11 @@
 //!
 //! Exporting the data to a widely used format such as [mbox](http://qmail.org./man/man5/mbox.html)
 //! can be done by running with the `export` subcommand
-//! 
+//!
 //! ```bash
 //! ./gbackup-rs -c ~/.gbackup.toml export
 //! ```
-//! 
+//!
 //! This will in turn run any export engines configured for each account in the config,
 //! if any.
 
