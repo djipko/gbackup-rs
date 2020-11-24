@@ -36,6 +36,9 @@
 //!     [accounts.backup]
 //!         type = "Sqlite"
 //!         backup_dir = "/Users/firstname/gmail_backup_test/"
+//!     [accounts.export]
+//!         type = "Mbox"
+//!         path = "/Users/firstname/gmail.mbox"
 //! ```
 //!
 //! and by default it's expected to be stored in a file called `.gbackup.toml` in the

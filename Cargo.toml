@@ -1,6 +1,6 @@
 [package]
 name = "gbackup-rs"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Nikola Dipanov <nikola.djipanov@gmail.com>"]
 edition = "2018"
 description = "Fast and configurable CLI tool to back-up your GMail data"
