@@ -61,7 +61,7 @@ and by default it's expected to be stored in a file called `.gbackup.toml` in th
 working directory (but is configurable via the -c option). Then you would simply run:
 
 ```bash
- GMAIL_PASSWORD="mysecretpass" ./gbackup-rs -w 10
+ GMAIL_PASSWORD="mysecretpass" gbackup-rs -w 10
 ```
 
 This is recommended for the first back-up as it will pull down email using
@@ -79,7 +79,7 @@ Exporting the data to a widely used format such as [mbox](http://qmail.org./man/
 can be done by running with the `export` subcommand
 
 ```bash
-./gbackup-rs -c ~/.gbackup.toml export
+gbackup-rs -c ~/.gbackup.toml export
 ```
 
 This will in turn run any export engines configured for each account in the config,
