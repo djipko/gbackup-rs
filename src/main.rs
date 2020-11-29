@@ -24,8 +24,9 @@
 //!
 //! ## Usage
 //!
-//! There is an example of a config file in the top level directory. A simple and
-//! rather self-explanatory config would look something like:
+//! gbackup-rs is driven by a single configuration file. This is best explained with
+//! a simple example - there is an example of a config file in the top level directory.
+//! A simple and rather self-explanatory config would look something like:
 //!
 //! ```toml
 //! [[accounts]]

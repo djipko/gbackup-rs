@@ -1,6 +1,7 @@
 # gbackup-rs - Backup your GMail
 
 [![Build Status](https://travis-ci.org/djipko/gbackup-rs.svg?branch=master)](https://travis-ci.org/djipko/gbackup-rs)
+[![Crates.io](https://img.shields.io/crates/v/gbackup-rs.svg)](https://crates.io/crates/gbackup-rs)
 
 gbackup-rs is yet another tool for backing up your GMail account with a few
 features worth calling out:
@@ -24,10 +25,23 @@ main goal of the design is to allow for fast backups and prevent data-loss, shou
 you lose access to your Gmail account for whatever reason (after ~15 years of using GMail - I personally
 have invaluable data from several stages of life that would be really hard to replace).
 
+## Installing
+
+The easiest way to install this software is using `cargo`. If you have cargo installed,
+simply run:
+
+```bash
+ cargo install gbackup-rs
+```
+
+Installing cargo itself can be done by following the guide to installing the Rust
+environment using `rustup` as described [here](https://www.rust-lang.org/tools/install).
+
 ## Usage
 
-There is an example of a config file in the top level directory. A simple and
-rather self-explanatory config would look something like:
+gbackup-rs is driven by a single configuration file. This is best explained with
+a simple example - there is an example of a config file in the top level directory.
+A simple and rather self-explanatory config would look something like:
 
 ```toml
 [[accounts]]
