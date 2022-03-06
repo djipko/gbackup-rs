@@ -12,7 +12,7 @@ repository = "https://github.com/djipko/gbackup-rs/"
 [dependencies]
 chrono = "0.4.19"
 clap = "2.27.1"
-imap = "2.3.0"
+imap = "2.4.1"
 mailparse = "0.13.0"
 native-tls = "0.2.4"
 rusqlite = "0.24.0"
