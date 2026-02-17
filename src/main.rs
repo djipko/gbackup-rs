@@ -67,6 +67,7 @@
 //! This will in turn run any export engines configured for each account in the config,
 //! if any.
 
+use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use clap::{value_parser, Arg, Command};
 use async_imap::error::Error as IMAPError;
@@ -77,7 +78,7 @@ use mailparse;
 use mailparse::MailHeaderMap;
 use native_tls;
 use native_tls::Error as TLSError;
-use rusqlite;
+use tokio_rusqlite::rusqlite;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::error::Error as StdError;
@@ -135,14 +136,16 @@ enum BackupEngineError {
     EngineLoadError(String),
     #[error("Backup engine issue with Sqlite DB: {0}!")]
     EngineRunSqliteError(#[from] rusqlite::Error),
+    #[error("Backup engine async Sqlite error: {0}")]
+    EngineRunAsyncSqliteError(#[from] tokio_rusqlite::Error<rusqlite::Error>),
 }
 
 #[derive(Debug, Error)]
 enum ExportEngineError {
     #[error("Export engine issue with Sqlite DB: {0}!")]
     SqliteError(#[from] rusqlite::Error),
-    #[error("Export engine issue while loading data from Sqlite DB: {0}!")]
-    SqliteReadError(#[from] rusqlite::types::FromSqlError),
+    #[error("Export engine async Sqlite error: {0}")]
+    AsyncSqliteError(#[from] tokio_rusqlite::Error<rusqlite::Error>),
     #[error("Operation not supported by engine")]
     UnsupportedOp,
     #[error("Export engine IO error: {0}")]
@@ -183,6 +186,7 @@ struct ExportEmail {
 /// Main trait used to implement a backup strategy - see method docs for more
 /// details on how this can be used, and see the 2 implemented engines
 /// `StdoutEngine` and `SqliteEngine` for details
+#[async_trait(?Send)]
 trait BackupEngine {
     /// This method should expect to be passed a list of all available UIDs
     /// (potentially for a specific mailbox, in a future implementation) and it
@@ -191,7 +195,7 @@ trait BackupEngine {
     ///
     /// This will be used to implement incremental backups so that we don't pull
     /// down unnecessary emails
-    fn filter_for_backup(
+    async fn filter_for_backup(
         &self,
         search_uids: &HashSet<Uid>,
     ) -> Result<HashSet<Uid>, BackupEngineError>;
@@ -199,13 +203,13 @@ trait BackupEngine {
     /// emails downloaded. For more details on the Fetch struct see it's docs
     /// in the imap crate. Any progress reporting should be done from this
     /// method too - it will be called only once per each GMail account in the config
-    fn run_backup(&mut self, to_backup: &Vec<&Fetch>) -> Result<(), BackupEngineError>;
+    async fn run_backup(&mut self, to_backup: &Vec<&Fetch>) -> Result<(), BackupEngineError>;
 
     /// If an engine can be used for exporting data - this is the method to
     /// implement that will be called and pass the data to a struct implementing
     /// the `ExportEngine` trait (see bellow). `SqliteEngine` provides a good
     /// example of this
-    fn get_all_emails_raw(&self) -> Result<Vec<ExportEmail>, ExportEngineError> {
+    async fn get_all_emails_raw(&self) -> Result<Vec<ExportEmail>, ExportEngineError> {
         Err(ExportEngineError::UnsupportedOp)
     }
 }
@@ -236,8 +240,9 @@ impl<'a> StdoutEngine<'a> {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a> BackupEngine for StdoutEngine<'a> {
-    fn filter_for_backup(
+    async fn filter_for_backup(
         &self,
         search_uids: &HashSet<Uid>,
     ) -> Result<HashSet<Uid>, BackupEngineError> {
@@ -246,7 +251,7 @@ impl<'a> BackupEngine for StdoutEngine<'a> {
         ))
     }
 
-    fn run_backup(&mut self, to_backup: &Vec<&Fetch>) -> Result<(), BackupEngineError> {
+    async fn run_backup(&mut self, to_backup: &Vec<&Fetch>) -> Result<(), BackupEngineError> {
         to_backup
             .iter()
             .map(|f| {
@@ -268,25 +273,29 @@ impl<'a> BackupEngine for StdoutEngine<'a> {
 struct SqliteEngine<'a> {
     #[allow(dead_code)]
     account: &'a GBackupAccount,
-    conn: rusqlite::Connection,
+    conn: tokio_rusqlite::Connection,
 }
 
 impl<'a> SqliteEngine<'a> {
-    fn new(account: &'a GBackupAccount) -> Result<Box<SqliteEngine<'a>>, BackupEngineError> {
+    async fn new(account: &'a GBackupAccount) -> Result<Box<SqliteEngine<'a>>, BackupEngineError> {
         if let GBackupAccount {
             backup: Some(BackupEngineConfig::Sqlite { backup_dir }),
             ..
         } = account
         {
             let db = Path::new(backup_dir).join("backup.sqlite");
-            let conn = rusqlite::Connection::open(db)?;
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS email (
+            let conn = tokio_rusqlite::Connection::open(db).await?;
+            conn.call(|conn| {
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS email (
                 uid INTEGER PRIMARY KEY,
                 rfc822_body BLOB
             )",
-                rusqlite::params![],
-            )?;
+                    rusqlite::params![],
+                )?;
+                Ok(())
+            })
+            .await?;
             Ok(Box::new(SqliteEngine { account, conn }))
         } else {
             Err(BackupEngineError::EngineLoadError(format!(
@@ -297,65 +306,88 @@ impl<'a> SqliteEngine<'a> {
     }
 }
 
+#[async_trait(?Send)]
 impl<'s> BackupEngine for SqliteEngine<'s> {
-    fn filter_for_backup(
+    async fn filter_for_backup(
         &self,
         search_uids: &HashSet<Uid>,
     ) -> Result<HashSet<Uid>, BackupEngineError> {
-        let mut stmt = self.conn.prepare("SELECT uid FROM email")?;
-        let backed_up_uids = stmt
-            .query_map([], |row| row.get::<_, Uid>(0))?
-            .collect::<Result<HashSet<Uid>, _>>()?;
+        let backed_up_uids = self
+            .conn
+            .call(|conn| {
+                let mut stmt = conn.prepare("SELECT uid FROM email")?;
+                let backed_up_uids = stmt
+                    .query_map([], |row| row.get::<_, Uid>(0))?
+                    .collect::<Result<HashSet<Uid>, _>>()?;
+                Ok(backed_up_uids)
+            })
+            .await?;
         let to_backup = search_uids.difference(&backed_up_uids).copied().collect();
         Ok(to_backup)
     }
 
-    fn run_backup(&mut self, to_backup: &Vec<&Fetch>) -> Result<(), BackupEngineError> {
-        let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("INSERT OR REPLACE INTO email VALUES (?, ?)")?;
+    async fn run_backup(&mut self, to_backup: &Vec<&Fetch>) -> Result<(), BackupEngineError> {
         println!("To backup: {:?}", to_backup.len());
-        let backed_up_ids = to_backup
+        let rows = to_backup
             .iter()
-            .map(|f| {
+            .filter_map(|f| {
                 if let Fetch { uid: Some(uid), .. } = f {
-                    stmt.execute(rusqlite::params![&uid, f.body(),])
+                    f.body().map(|body| (*uid, body.to_vec()))
                 } else {
-                    Ok(0)
+                    None
                 }
             })
-            .collect::<Result<Vec<usize>, _>>()?;
-        drop(stmt);
-        tx.commit()?;
+            .collect::<Vec<(Uid, Vec<u8>)>>();
+        let backed_up_count = self
+            .conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                let mut stmt = tx.prepare("INSERT OR REPLACE INTO email VALUES (?, ?)")?;
+                let backed_up_count = rows
+                    .iter()
+                    .map(|(uid, body)| stmt.execute(rusqlite::params![uid, body]))
+                    .collect::<Result<Vec<usize>, _>>()?
+                    .iter()
+                    .filter(|id| **id != 0)
+                    .count();
+                drop(stmt);
+                tx.commit()?;
+                Ok(backed_up_count)
+            })
+            .await?;
         println!(
             "Backed up {}/{} emails successfully",
-            backed_up_ids
-                .iter()
-                .filter_map(|id| if *id != 0 { Some(id) } else { None })
-                .count(),
+            backed_up_count,
             to_backup.len()
         );
         Ok(())
     }
 
-    fn get_all_emails_raw(&self) -> Result<Vec<ExportEmail>, ExportEngineError> {
-        let mut stmt = self.conn.prepare("SELECT uid, rfc822_body FROM email")?;
-        let emails = stmt
-            .query_map([], |row| {
-                let uid = row.get(0)?;
-                let raw_data = row.get(1)?;
-                Ok(ExportEmail { raw_data, uid })
-            })?
-            .collect::<Result<Vec<ExportEmail>, _>>()?;
+    async fn get_all_emails_raw(&self) -> Result<Vec<ExportEmail>, ExportEngineError> {
+        let emails = self
+            .conn
+            .call(|conn| {
+                let mut stmt = conn.prepare("SELECT uid, rfc822_body FROM email")?;
+                let emails = stmt
+                    .query_map([], |row| {
+                        let uid = row.get(0)?;
+                        let raw_data = row.get(1)?;
+                        Ok(ExportEmail { raw_data, uid })
+                    })?
+                    .collect::<Result<Vec<ExportEmail>, _>>()?;
+                Ok(emails)
+            })
+            .await?;
         Ok(emails)
     }
 }
 
-fn get_backup_engine<'a>(
+async fn get_backup_engine<'a>(
     account: &'a GBackupAccount,
 ) -> Result<Box<dyn BackupEngine + 'a>, GBackupError> {
     match account.backup {
         Some(BackupEngineConfig::Stdout { .. }) => Ok(StdoutEngine::new(account)?),
-        Some(BackupEngineConfig::Sqlite { .. }) => Ok(SqliteEngine::new(account)?),
+        Some(BackupEngineConfig::Sqlite { .. }) => Ok(SqliteEngine::new(account).await?),
         _ => Err(GBackupError::BackupConfigError(format!(
             "Can't load engine from the empty backup config for {:?}",
             account
@@ -418,7 +450,7 @@ impl BackupRunner {
 
     async fn run_backup(self) -> Result<(), GBackupError> {
         let ro_acct = self.account.read().unwrap();
-        let mut engine = get_backup_engine(&ro_acct)?;
+        let mut engine = get_backup_engine(&ro_acct).await?;
         let mut session = BackupRunner::new_imap_session(&self.account).await?;
         // TODO: This should also be configurable, we may want to backup all mail,
         // specific labes, etc... note also that the mailbox names may not be the same
@@ -431,7 +463,7 @@ impl BackupRunner {
             ro_acct.username
         );
 
-        let uids_to_backup = engine.filter_for_backup(&uids)?;
+        let uids_to_backup = engine.filter_for_backup(&uids).await?;
         println!(
             "Uids that need backing up for account {}: {:?}",
             ro_acct.username, uids_to_backup
@@ -463,7 +495,7 @@ impl BackupRunner {
                 .filter(|&f| f.uid.is_some() & f.body().is_some())
                 .collect();
             println!("Backing up messages for {}", ro_acct.username);
-            engine.run_backup(&emails)?;
+            engine.run_backup(&emails).await?;
         }
         Ok(())
     }
@@ -588,11 +620,11 @@ struct ExportRunner {
 }
 
 impl ExportRunner {
-    fn run_export(self) -> Result<(), GBackupError> {
-        let backup_engine = get_backup_engine(&self.account)?;
+    async fn run_export(self) -> Result<(), GBackupError> {
+        let backup_engine = get_backup_engine(&self.account).await?;
         let export_engine = get_export_engine(&self.account)?;
 
-        let emails = backup_engine.get_all_emails_raw()?;
+        let emails = backup_engine.get_all_emails_raw().await?;
         export_engine.export_emails(&emails)?;
         Ok(())
     }
@@ -633,7 +665,7 @@ async fn main() -> Result<(), Box<dyn StdError>> {
     for account in config.accounts.into_iter() {
         if matches.subcommand_matches("export").is_some() {
             let runner = ExportRunner { account };
-            if let Err(error) = runner.run_export() {
+            if let Err(error) = runner.run_export().await {
                 println!("Got error running export: {}", error);
             }
         } else {
