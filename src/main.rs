@@ -525,13 +525,15 @@ impl<'a> MboxEngine<'a> {
         let date = mailparse::dateparse(&date_str).or(Err(ExportEngineError::MboxFormatError(
             format!("Can't parse Date from header in email: {}", email.uid),
         )))?;
+        let dt = Utc
+            .timestamp_opt(date, 0)
+            .single()
+            .ok_or(ExportEngineError::MboxFormatError(format!(
+                "Invalid or ambiguous timestamp in email: {}",
+                email.uid
+            )))?;
         let mut buffer = Vec::new();
-        write!(
-            &mut buffer,
-            "From {} {}\n",
-            addr,
-            Utc.timestamp(date, 0).format("%a %b %d %T %Y")
-        )?;
+        write!(&mut buffer, "From {} {}\n", addr, dt.format("%a %b %d %T %Y"))?;
         Ok(buffer)
     }
 }
