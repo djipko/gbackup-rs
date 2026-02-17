@@ -68,7 +68,7 @@
 //! if any.
 
 use chrono::{TimeZone, Utc};
-use clap::{App, Arg, SubCommand};
+use clap::{value_parser, Arg, Command};
 use imap::error::Error as IMAPError;
 use imap::types::{Fetch, Uid, ZeroCopy};
 use imap::Session;
@@ -596,33 +596,32 @@ impl ExportRunner {
 }
 
 fn main() -> Result<(), Box<dyn StdError>> {
-    let matches = App::new("Gmail backup")
+    let matches = Command::new("Gmail backup")
         .version("0.1")
         .author("Nikola Dipanov")
         .about("Backup your gmail stuff")
         .arg(
-            Arg::with_name("config")
-                .short("c")
+            Arg::new("config")
+                .short('c')
                 .long("config")
                 .value_name("FILE")
                 .help("Sets a custom config file")
-                .takes_value(true)
                 .default_value(".gbackup.toml"),
         )
         .arg(
-            Arg::with_name("workers")
-                .short("w")
+            Arg::new("workers")
+                .short('w')
                 .long("workers")
                 .value_name("N_WORKERS")
                 .help("Number of concurrent IMAP connections")
-                .takes_value(true)
+                .value_parser(value_parser!(usize))
                 .default_value("1"),
         )
-        .subcommand(SubCommand::with_name("export").about("Run an export instead of backing up"))
+        .subcommand(Command::new("export").about("Run an export instead of backing up"))
         .get_matches();
 
-    let config_file = matches.value_of("config").unwrap();
-    let workers: usize = matches.value_of("workers").unwrap().parse().unwrap();
+    let config_file = matches.get_one::<String>("config").unwrap();
+    let workers = *matches.get_one::<usize>("workers").unwrap();
     println!("Using config file: {}", config_file);
     let config_str = fs::read_to_string(config_file)?;
     let config: GBackupConfig = toml::from_str(&config_str)?;
@@ -631,7 +630,7 @@ fn main() -> Result<(), Box<dyn StdError>> {
         .accounts
         .into_iter()
         .map(|account| {
-            if let Some(_) = matches.subcommand_matches("export") {
+            if matches.subcommand_matches("export").is_some() {
                 let runner = ExportRunner { account };
                 if let Err(error) = runner.run_export() {
                     println!("Got error running export: {}", error);
