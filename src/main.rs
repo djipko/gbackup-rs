@@ -69,9 +69,10 @@
 
 use chrono::{TimeZone, Utc};
 use clap::{value_parser, Arg, Command};
-use imap::error::Error as IMAPError;
-use imap::types::{Fetch, Uid, ZeroCopy};
-use imap::Session;
+use async_imap::error::Error as IMAPError;
+use async_imap::types::{Fetch, Uid};
+use async_imap::Session;
+use futures::{stream, StreamExt, TryStreamExt};
 use mailparse;
 use mailparse::MailHeaderMap;
 use native_tls;
@@ -87,13 +88,11 @@ use std::io::Write;
 use std::iter::FromIterator;
 use std::path::Path;
 use std::str;
-use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use threadpool::ThreadPool;
 use toml;
 
-type TLSStream = native_tls::TlsStream<std::net::TcpStream>;
+type TLSStream = tokio_native_tls::TlsStream<tokio::net::TcpStream>;
 type Rfc822Data = Vec<u8>;
 
 const ALL_MAIL_INBOX: &str = "[Gmail]/All Mail";
@@ -156,6 +155,8 @@ enum ExportEngineError {
 
 #[derive(Debug, Error)]
 enum GBackupError {
+    #[error("IO error {0}")]
+    IOError(#[from] std::io::Error),
     #[error("TLS error {0}")]
     TLSError(#[from] TLSError),
     #[error("IMAP error {0}")]
@@ -249,9 +250,14 @@ impl<'a> BackupEngine for StdoutEngine<'a> {
         to_backup
             .iter()
             .map(|f| {
+                let subject = f
+                    .envelope()
+                    .and_then(|e| e.subject.as_ref())
+                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                    .unwrap_or_else(|| "<no subject>".to_string());
                 println!(
                     "Would back up message w subject: {}",
-                    String::from_utf8(f.envelope().unwrap().subject.unwrap().to_vec()).unwrap()
+                    subject
                 )
             })
             .for_each(drop);
@@ -359,18 +365,18 @@ fn get_backup_engine<'a>(
 
 struct BackupRunner {
     account: Arc<RwLock<GBackupAccount>>,
-    pool: ThreadPool,
+    workers: usize,
 }
 
 impl BackupRunner {
     fn new(account: GBackupAccount, workers: usize) -> BackupRunner {
         BackupRunner {
             account: Arc::new(RwLock::new(account)),
-            pool: ThreadPool::new(workers),
+            workers: workers.max(1),
         }
     }
 
-    fn new_imap_session(
+    async fn new_imap_session(
         account: &Arc<RwLock<GBackupAccount>>,
     ) -> Result<Session<TLSStream>, GBackupError> {
         // TODO: Implement loading of paswords and othe auth options probably
@@ -379,37 +385,46 @@ impl BackupRunner {
         let LoadPassword::EnvVar { name } = &ro_acct.password;
         let password = std::env::var(&name)?;
 
-        let tls = native_tls::TlsConnector::new()?;
-        let client = imap::connect(("imap.gmail.com", 993), "imap.gmail.com", &tls)?;
+        let tls = tokio_native_tls::TlsConnector::from(native_tls::TlsConnector::new()?);
+        let tcp = tokio::net::TcpStream::connect(("imap.gmail.com", 993)).await?;
+        let tls_stream = tls.connect("imap.gmail.com", tcp).await?;
+        let mut client = async_imap::Client::new(tls_stream);
+        client.read_response().await?;
 
-        let session = client.login(&ro_acct.username, password).map_err(|e| e.0)?;
+        let session = client
+            .login(&ro_acct.username, password)
+            .await
+            .map_err(|e| e.0)?;
         println!("Successfully created IMAP session for {}", ro_acct.username);
 
         Ok(session)
     }
 
-    fn do_fetch(
+    async fn do_fetch(
         account: Arc<RwLock<GBackupAccount>>,
         chunk: &[Uid],
-    ) -> Result<ZeroCopy<Vec<Fetch>>, GBackupError> {
-        let mut session = BackupRunner::new_imap_session(&account)?;
-        session.select(ALL_MAIL_INBOX)?;
-        let fetched = session.uid_fetch(
+    ) -> Result<Vec<Fetch>, GBackupError> {
+        let mut session = BackupRunner::new_imap_session(&account).await?;
+        session.select(ALL_MAIL_INBOX).await?;
+        let fetched = session
+            .uid_fetch(
             Vec::from_iter(chunk.iter().map(|uid| uid.to_string())).join(","),
             "BODY.PEEK[]",
-        )?;
+        )
+            .await?;
+        let fetched = fetched.try_collect::<Vec<Fetch>>().await?;
         Ok(fetched)
     }
 
-    fn run_backup(self) -> Result<(), GBackupError> {
+    async fn run_backup(self) -> Result<(), GBackupError> {
         let ro_acct = self.account.read().unwrap();
         let mut engine = get_backup_engine(&ro_acct)?;
-        let mut session = BackupRunner::new_imap_session(&self.account)?;
+        let mut session = BackupRunner::new_imap_session(&self.account).await?;
         // TODO: This should also be configurable, we may want to backup all mail,
         // specific labes, etc... note also that the mailbox names may not be the same
         // depending on the language
-        session.select(ALL_MAIL_INBOX)?;
-        let uids = session.uid_search("ALL")?;
+        session.select(ALL_MAIL_INBOX).await?;
+        let uids = session.uid_search("ALL").await?;
         println!(
             "Found {} messages in total for account {}",
             uids.len(),
@@ -421,37 +436,25 @@ impl BackupRunner {
             "Uids that need backing up for account {}: {:?}",
             ro_acct.username, uids_to_backup
         );
-        let chunk_len = (uids_to_backup.len() / self.pool.max_count()) + 1;
+        let chunk_len = (uids_to_backup.len() / self.workers) + 1;
         if !uids_to_backup.is_empty() {
             println!(
                 "Downloading messages for {} with {} workers",
                 ro_acct.username,
-                self.pool.max_count()
+                self.workers
             );
-            let (tx, rx) = channel();
-            Vec::from_iter(uids_to_backup)
+            let uid_vec = Vec::from_iter(uids_to_backup);
+            let chunks = uid_vec
                 .chunks(chunk_len)
-                .map(|chunk| {
-                    // TODO: Instead of this copy over here - we could use
-                    // scoped thread from crossbeam crate
-                    // (not supported by the thread pool though)
-                    let curr_chunk_len = chunk.len();
-                    let mut chunk_vec = Vec::with_capacity(curr_chunk_len);
-                    chunk_vec.resize(curr_chunk_len, 0);
-                    chunk_vec.copy_from_slice(chunk);
-                    let tx = tx.clone();
-                    let account = Arc::clone(&self.account);
-                    self.pool.execute(move || {
-                        let fetch_res = BackupRunner::do_fetch(account, &chunk_vec);
-                        // This can panic but it's unlikely!
-                        tx.send(fetch_res).unwrap();
-                    })
-                })
-                .for_each(drop);
-            self.pool.join();
-            let emails = rx
-                .try_iter()
-                .collect::<Result<Vec<ZeroCopy<Vec<Fetch>>>, _>>()?;
+                .map(|chunk| chunk.to_vec())
+                .collect::<Vec<Vec<Uid>>>();
+            let emails = stream::iter(chunks.into_iter().map(|chunk| {
+                let account = Arc::clone(&self.account);
+                async move { BackupRunner::do_fetch(account, &chunk).await }
+            }))
+            .buffer_unordered(self.workers)
+            .try_collect::<Vec<Vec<Fetch>>>()
+            .await?;
             // Server can include so called unilateral responses - drop them if they don't
             // have a body
             let emails = emails
@@ -627,22 +630,18 @@ async fn main() -> Result<(), Box<dyn StdError>> {
     let config_str = fs::read_to_string(config_file)?;
     let config: GBackupConfig = toml::from_str(&config_str)?;
     println!("Loaded config from {}", config_file);
-    config
-        .accounts
-        .into_iter()
-        .map(|account| {
-            if matches.subcommand_matches("export").is_some() {
-                let runner = ExportRunner { account };
-                if let Err(error) = runner.run_export() {
-                    println!("Got error running export: {}", error);
-                }
-            } else {
-                let runner = BackupRunner::new(account, workers);
-                if let Err(error) = runner.run_backup() {
-                    println!("Got error running backup: {}", error);
-                }
+    for account in config.accounts.into_iter() {
+        if matches.subcommand_matches("export").is_some() {
+            let runner = ExportRunner { account };
+            if let Err(error) = runner.run_export() {
+                println!("Got error running export: {}", error);
             }
-        })
-        .for_each(drop);
+        } else {
+            let runner = BackupRunner::new(account, workers);
+            if let Err(error) = runner.run_backup().await {
+                println!("Got error running backup: {}", error);
+            }
+        }
+    }
     Ok(())
 }
