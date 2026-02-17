@@ -216,7 +216,7 @@ struct StdoutEngine<'a> {
 }
 
 impl<'a> StdoutEngine<'a> {
-    fn new(account: &'a GBackupAccount) -> Result<Box<StdoutEngine>, BackupEngineError> {
+    fn new(account: &'a GBackupAccount) -> Result<Box<StdoutEngine<'a>>, BackupEngineError> {
         if let GBackupAccount {
             backup: Some(BackupEngineConfig::Stdout { count }),
             ..
@@ -266,7 +266,7 @@ struct SqliteEngine<'a> {
 }
 
 impl<'a> SqliteEngine<'a> {
-    fn new(account: &'a GBackupAccount) -> Result<Box<SqliteEngine>, BackupEngineError> {
+    fn new(account: &'a GBackupAccount) -> Result<Box<SqliteEngine<'a>>, BackupEngineError> {
         if let GBackupAccount {
             backup: Some(BackupEngineConfig::Sqlite { backup_dir }),
             ..
