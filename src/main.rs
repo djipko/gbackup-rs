@@ -595,7 +595,8 @@ impl ExportRunner {
     }
 }
 
-fn main() -> Result<(), Box<dyn StdError>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn StdError>> {
     let matches = Command::new("Gmail backup")
         .version("0.1")
         .author("Nikola Dipanov")
