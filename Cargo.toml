@@ -17,6 +17,6 @@ mailparse = "0.13.0"
 native-tls = "0.2.16"
 rusqlite = "0.24.0"
 serde = { version = "1.0.228", features = ["derive"] }
-thiserror = "1.0"
+thiserror = "2.0.18"
 threadpool = "1.8.1"
 toml = "0.5.6"
