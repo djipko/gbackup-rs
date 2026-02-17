@@ -19,4 +19,4 @@ rusqlite = "0.24.0"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 threadpool = "1.8.1"
-toml = "0.5.6"
+toml = "1.0.2"
