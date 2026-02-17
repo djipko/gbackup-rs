@@ -298,7 +298,7 @@ impl<'s> BackupEngine for SqliteEngine<'s> {
     ) -> Result<HashSet<Uid>, BackupEngineError> {
         let mut stmt = self.conn.prepare("SELECT uid FROM email")?;
         let backed_up_uids = stmt
-            .query_map(rusqlite::NO_PARAMS, |row| row.get::<_, Uid>(0))?
+            .query_map([], |row| row.get::<_, Uid>(0))?
             .collect::<Result<HashSet<Uid>, _>>()?;
         let to_backup = search_uids.difference(&backed_up_uids).copied().collect();
         Ok(to_backup)
@@ -334,7 +334,7 @@ impl<'s> BackupEngine for SqliteEngine<'s> {
     fn get_all_emails_raw(&self) -> Result<Vec<ExportEmail>, ExportEngineError> {
         let mut stmt = self.conn.prepare("SELECT uid, rfc822_body FROM email")?;
         let emails = stmt
-            .query_map(rusqlite::NO_PARAMS, |row| {
+            .query_map([], |row| {
                 let uid = row.get(0)?;
                 let raw_data = row.get(1)?;
                 Ok(ExportEmail { raw_data, uid })
