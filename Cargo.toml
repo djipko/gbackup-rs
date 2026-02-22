@@ -10,13 +10,16 @@ categories = ["command-line-utilities"]
 repository = "https://github.com/djipko/gbackup-rs/"
 
 [dependencies]
+async-trait = "0.1"
 chrono = "0.4.43"
 clap = "4.5.59"
-imap = "2.4.1"
+async-imap = { version = "0.11.2", default-features = false, features = ["runtime-tokio"] }
+futures = "0.3"
 mailparse = "0.16.1"
 native-tls = "0.2.16"
-rusqlite = "0.38.0"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
-threadpool = "1.8.1"
 toml = "1.0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio-native-tls = "0.3"
+tokio-rusqlite = "0.7.0"
